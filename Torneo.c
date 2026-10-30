@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -43,10 +44,15 @@ static pthread_mutex_t glg=PTHREAD_MUTEX_INITIALIZER;
 static FILE*glf;
 static void lgraw(const char*s){
     pthread_mutex_lock(&glg);
-    fputs(s,stdout);fflush(stdout);
-    if(glf){f
-        puts(s,glf);fflush(glf);
+
+    fputs(s, stdout);
+    fflush(stdout);
+
+    if(glf){
+        fputs(s, glf);
+        fflush(glf);
     }
+
     pthread_mutex_unlock(&glg);
 }
 static void lg(const char*f,...){
@@ -59,11 +65,18 @@ static void lg(const char*f,...){
     lgraw(c);
 }
 static char*cn(int c,char*b){
-    if(c==TTOP)strcpy(b,"TRONO_TOP");
-    else if(c==TLEFT)strcpy(b,"TRONO_LEFT");
-    else if(c==TRIGHT)strcpy(b,"TRONO_RIGHT");
-    else if(c>=0&&c<NG)sprintf(b,"%d,%d",c%5,c/5);
-    else strcpy(b,"?");return b;
+    if(c==TTOP)
+        strcpy(b,"TRONO_TOP");
+    else if(c==TLEFT)
+        strcpy(b,"TRONO_LEFT");
+    else if(c==TRIGHT)
+        strcpy(b,"TRONO_RIGHT");
+    else if(c>=0&&c<NG)
+        sprintf(b,"%d,%d",c%5,c/5);
+    else
+        strcpy(b,"?");
+
+    return b;
 }
 static void pnom(int sl,char*b){
     if(sl==SP)strcpy(b,"PUMA");
@@ -182,7 +195,7 @@ static void layout(mesa_t*m){
     int d[NP]={0,1,2,3,4,5,6,7,8,9,10,14};
     for(int i=0;i<NP;i++){
         int c=m->cfg.dset?m->cfg.dinit[i]:d[i];
-        if(c<0||m->cell[c]!=LIBRE){
+        if(c<0||c>=NN||m->cell[c]!=LIBRE){
             continue;
         }
         m->cell[c]=i;
@@ -605,5 +618,258 @@ static void*th_juez(void*a){
     lg("MESA %d: solicitudes=%ld aceptadas=%ld rechazadas=%ld colisiones=%ld capturas=%d tablero=%s",m->id,m->nreq,m->nok,m->nrech,m->ncol,m->caps,verificar(m)?"consistente":"INCONSISTENTE");
     ul(m);
     mesa_fin(m);
+    return NULL;
+}
+
+// Control del torneo(organizacion): llegada, emparejamiento y asignacion de mesas
+static pthread_mutex_t gmu=PTHREAD_MUTEX_INITIALIZER;
+static srv_t*gact;
+static atomic_int gfin,gscript,gabort;
+ 
+static srv_t*srv_nuevo(int n,int mx,const cfg_t*cfg,int script,int quiet,long maxreq){
+    srv_t*s=calloc(1,sizeof*s);
+    s->n=n;
+    s->mx=mx;
+    s->cfg=*cfg;
+    s->script=script;
+    s->quiet=quiet;
+    s->maxreq=maxreq;
+    s->cl=calloc((size_t)n,sizeof(cli_t));
+    s->pq=calloc((size_t)n,sizeof(int));
+    s->dq=calloc((size_t)n,sizeof(int));
+    s->ms=calloc((size_t)n/2+1,sizeof(mesa_t));
+    pthread_mutex_init(&s->mu,NULL);
+    pthread_cond_init(&s->cv,NULL);
+    pthread_cond_init(&s->ccv,NULL);
+    sem_init(&s->mesas,0,(unsigned)mx);
+    return s;
+}
+ 
+static void srv_destroy(srv_t*s){
+    for(int i=0;i<s->nlanz;i++){
+        mesa_t*m=&s->ms[i];
+        pthread_mutex_destroy(&m->mu);
+        pthread_cond_destroy(&m->qcv);
+        pthread_cond_destroy(&m->rcv);
+    }
+    pthread_mutex_destroy(&s->mu);
+    pthread_cond_destroy(&s->cv);
+    pthread_cond_destroy(&s->ccv);
+    sem_destroy(&s->mesas);
+    free(s->cl);
+    free(s->pq);
+    free(s->dq);
+    free(s->ms);
+    free(s);
+}
+ 
+static void srv_detener(srv_t*s){
+    pthread_mutex_lock(&s->mu);
+    if(!s->stop){
+        s->stop=1;
+        lg("SERVIDOR: SIGINT, no se aceptan mas jugadores; notificando a %d mesas activas",s->nact);
+        pthread_cond_broadcast(&s->cv);
+        pthread_cond_broadcast(&s->ccv);
+        for(int i=0;i<s->nlanz;i++){
+            mesa_t*m=&s->ms[i];
+            lk(m);
+            if(!m->over&&!m->abort&&!m->fallo&&!m->winner){
+                m->abort=1;
+                snprintf(m->why,sizeof m->why,"interrupcion del servidor (SIGINT)");
+            }
+            pthread_cond_broadcast(&m->qcv);
+            pthread_cond_broadcast(&m->rcv);
+            ul(m);
+        }
+    }
+    pthread_mutex_unlock(&s->mu);
+    sem_post(&s->mesas);
+}
+ 
+static void*th_cli(void*a){
+    cli_t*c=a;
+    srv_t*s=c->s;
+    unsigned sd=s->cfg.seed*40503u+(unsigned)c->id*2654435761u+7u;
+    dormir((int)(rand_r(&sd)%25u));
+    pthread_mutex_lock(&s->mu);
+    s->llegados++;
+    if(s->stop){
+        c->est=E_CANC;
+        pthread_cond_broadcast(&s->cv);
+    }else{
+        c->est=E_ESP;
+        if(c->rol==0){
+            s->pq[s->pt++]=c->id;
+        }else{
+            s->dq[s->dt++]=c->id;
+        }
+        lg("CLIENTE %d llega como %s",c->id,c->rol?"PERROS":"PUMA");
+        pthread_cond_broadcast(&s->cv);
+        while(!s->stop&&(c->est==E_ESP||c->est==E_JUG)){
+            pthread_cond_wait(&s->ccv,&s->mu);
+        }
+        if(c->est==E_ESP||c->est==E_JUG){
+            c->est=E_CANC;
+        }
+    }
+    pthread_mutex_unlock(&s->mu);
+    return NULL;
+}
+ 
+static void*th_mm(void*a){
+    srv_t*s=a;
+    int lanz=0;
+    for(;;){
+        pthread_mutex_lock(&s->mu);
+        while(!s->stop&&!(s->pt>s->ph&&s->dt>s->dh)&&s->llegados<s->n){
+            pthread_cond_wait(&s->cv,&s->mu);
+        }
+        if(s->stop){
+            pthread_mutex_unlock(&s->mu);
+            break;
+        }
+        if(!(s->pt>s->ph&&s->dt>s->dh)){
+            while(s->ph<s->pt){
+                s->cl[s->pq[s->ph]].est=E_SINPAR;
+                lg("CLIENTE %d queda sin pareja",s->pq[s->ph]);
+                s->ph++;
+            }
+            while(s->dh<s->dt){
+                s->cl[s->dq[s->dh]].est=E_SINPAR;
+                lg("CLIENTE %d queda sin pareja",s->dq[s->dh]);
+                s->dh++;
+            }
+            pthread_cond_broadcast(&s->ccv);
+            pthread_mutex_unlock(&s->mu);
+            break;
+        }
+        cli_t*p=&s->cl[s->pq[s->ph++]],*d=&s->cl[s->dq[s->dh++]];
+        p->est=E_JUG;
+        d->est=E_JUG;
+        pthread_mutex_unlock(&s->mu);
+        while(sem_wait(&s->mesas)==-1&&errno==EINTR);
+        pthread_mutex_lock(&s->mu);
+        if(s->stop){
+            p->est=E_CANC;
+            d->est=E_CANC;
+            pthread_cond_broadcast(&s->ccv);
+            pthread_mutex_unlock(&s->mu);
+            break;
+        }
+        mesa_t*m=&s->ms[lanz];
+        mesa_ini(m,s,lanz+1,p,d);
+        s->nact++;
+        if(s->nact>s->maxact){
+            s->maxact=s->nact;
+        }
+        lg("MATCHMAKER: pareja (cliente %d Puma, cliente %d Perros) -> mesa %d (activas %d/%d)",p->id,d->id,m->id,s->nact,s->mx);
+        if(pthread_create(&m->th,NULL,th_juez,m)!=0){
+            lg("error creando juez");
+            s->nact--;
+            p->est=E_CANC;
+            d->est=E_CANC;
+            pthread_mutex_unlock(&s->mu);
+            pthread_mutex_destroy(&m->mu);
+            pthread_cond_destroy(&m->qcv);
+            pthread_cond_destroy(&m->rcv);
+            sem_post(&s->mesas);
+            continue;
+        }
+        lanz++;
+        s->nlanz=lanz;
+        pthread_cond_broadcast(&s->cv);
+        pthread_mutex_unlock(&s->mu);
+    }
+    for(int i=0;i<lanz;i++){
+        pthread_join(s->ms[i].th,NULL);
+    }
+    pthread_mutex_lock(&s->mu);
+    s->fin=1;
+    pthread_cond_broadcast(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+    return NULL;
+}
+ 
+static void srv_iniciar(srv_t*s){
+    for(int i=0;i<s->n;i++){
+        cli_t*c=&s->cl[i];
+        c->id=i;
+        c->rol=i%2;
+        c->s=s;
+        if(pthread_create(&c->th,NULL,th_cli,c)==0){
+            c->ok=1;
+        }else{
+            pthread_mutex_lock(&s->mu);
+            s->llegados++;
+            c->est=E_CANC;
+            pthread_mutex_unlock(&s->mu);
+        }
+    }
+    pthread_create(&s->tmm,NULL,th_mm,s);
+    pthread_mutex_lock(&gmu);
+    gact=s;
+    if(atomic_load(&gabort)){
+        srv_detener(s);
+    }
+    pthread_mutex_unlock(&gmu);
+}
+ 
+static void srv_esperar(srv_t*s){
+    if(s->joined){
+        return;
+    }
+    pthread_join(s->tmm,NULL);
+    for(int i=0;i<s->n;i++){
+        if(s->cl[i].ok){
+            pthread_join(s->cl[i].th,NULL);
+        }
+    }
+    pthread_mutex_lock(&gmu);
+    gact=NULL;
+    pthread_mutex_unlock(&gmu);
+    s->joined=1;
+}
+ 
+static int srv_resumen(srv_t*s){
+    int ok=1,sp=0;
+    for(int i=0;i<s->n;i++){
+        if(s->cl[i].est==E_SINPAR){
+            sp++;
+        }
+    }
+    lg("RESUMEN: jugadores=%d mesas_max=%d mesas_usadas=%d simultaneas_max=%d",s->n,s->mx,s->nlanz,s->maxact);
+    lg("RESUMEN: victorias_puma=%d victorias_perros=%d abandonos=%d abortadas=%d limite=%d sin_pareja=%d",s->wp,s->wd,s->wab,s->wabort,s->wlim,sp);
+    if(s->maxact>s->mx){
+        lg("FALLO: se excedio el limite de mesas");
+        ok=0;
+    }
+    for(int i=0;i<s->nlanz;i++){
+        if(!verificar(&s->ms[i])){
+            lg("FALLO: tablero inconsistente en mesa %d",i+1);
+            ok=0;
+        }
+    }
+    return ok;
+}
+ 
+static void*th_sig(void*a){
+    (void)a;
+    sigset_t ss;
+    sigemptyset(&ss);
+    sigaddset(&ss,SIGINT);
+    struct timespec ts={0,100000000L};
+    while(!atomic_load(&gfin)){
+        if(sigtimedwait(&ss,NULL,&ts)<0){
+            continue;
+        }
+        if(!atomic_exchange(&gscript,0)){
+            atomic_store(&gabort,1);
+        }
+        pthread_mutex_lock(&gmu);
+        if(gact){
+            srv_detener(gact);
+        }
+        pthread_mutex_unlock(&gmu);
+    }
     return NULL;
 }
