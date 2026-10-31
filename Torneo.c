@@ -1130,3 +1130,234 @@ static int cargar(const char*f,cfg_t*cfg,test_t**ts,int*nts,int*suite){
     fclose(fp);
     return 0;
 }
+
+//casos de prueba
+typedef struct{mesa_t*m;int sl,from,to,dly,res;}sm_t;
+
+static void*th_sm(void*a){
+    sm_t*e=a;
+    dormir(e->dly);
+    e->res=enviar(e->m,e->sl,e->from,e->to);
+    return NULL;
+}
+
+typedef struct{mesa_t*m;int rol;}fa_t;
+
+static void*th_falla(void*a){
+    fa_t*f=a;
+    mesa_t*m=f->m;
+    lk(m);
+    m->fallo=1;
+    m->frol=f->rol;
+    pthread_cond_broadcast(&m->qcv);
+    pthread_cond_broadcast(&m->rcv);
+    pthread_exit(NULL);
+    return NULL;
+}
+
+static int run_test(test_t*t,int N,int M){
+    int n=N,mx=M,spawn=0,burst=0;
+    lg("TEST %d: %s",t->num,t->nombre);
+    for(int i=0;i<t->nev;i++){
+        if(t->ev[i].tipo==E_SPAWN){
+            spawn=1;
+            n=t->ev[i].a;
+            mx=t->ev[i].b;
+        }
+        if(t->ev[i].tipo==E_BURST){
+            burst=t->ev[i].a;
+        }
+    }
+    int scripted=!spawn&&!burst;
+    if(!spawn){
+        n=2;
+        mx=1;
+    }
+    srv_t*s=srv_nuevo(n,mx,&t->cfg,scripted,burst?1:0,burst);
+    srv_iniciar(s);
+    mesa_t*m0=NULL;
+    if(scripted){
+        pthread_mutex_lock(&s->mu);
+        while(s->nlanz<1&&!s->fin&&!s->stop){
+            pthread_cond_wait(&s->cv,&s->mu);
+        }
+        if(s->nlanz>=1){
+            m0=&s->ms[0];
+        }
+        pthread_mutex_unlock(&s->mu);
+    }
+    unsigned sd=t->cfg.seed*2246822519u+(unsigned)t->num;
+    unsigned span=(unsigned)(t->cfg.dmax-t->cfg.dmin+1);
+    int i=0;
+    while(i<t->nev){
+        ev_t*e=&t->ev[i];
+        if(e->tipo==E_MOVE){
+            if(!m0){
+                i++;
+                continue;
+            }
+            if(e->setup||e->from==e->to){
+                colocar(m0,e->slot,e->setup?e->to:e->from);
+                i++;
+                continue;
+            }
+            int g=1;
+            while(i+g<t->nev&&g<NS){
+                ev_t*f=&t->ev[i+g];
+                int dup=0;
+                if(f->tipo!=E_MOVE||f->setup||f->from==f->to||f->to!=e->to){
+                    break;
+                }
+                for(int k=0;k<g;k++){
+                    if(t->ev[i+k].slot==f->slot){
+                        dup=1;
+                    }
+                }
+                if(dup){
+                    break;
+                }
+                g++;
+            }
+            sm_t sm[NS];
+            pthread_t th[NS];
+            int cr[NS];
+            for(int k=0;k<g;k++){
+                ev_t*f=&t->ev[i+k];
+                colocar(m0,f->slot,f->from);
+                sm[k].m=m0;
+                sm[k].sl=f->slot;
+                sm[k].from=f->from;
+                sm[k].to=f->to;
+                sm[k].res=Q_FIN;
+                sm[k].dly=t->cfg.dmin+(int)(rand_r(&sd)%span);
+            }
+            if(g>1){
+                char b[16];
+                lg("TEST: %d fichas intentan ocupar %s de forma simultanea",g,cn(e->to,b));
+            }
+            for(int k=0;k<g;k++){
+                cr[k]=pthread_create(&th[k],NULL,th_sm,&sm[k])==0;
+            }
+            for(int k=0;k<g;k++){
+                if(cr[k]){
+                    pthread_join(th[k],NULL);
+                }else{
+                    th_sm(&sm[k]);
+                }
+            }
+            for(int k=0;k<g;k++){
+                if(sm[k].res==Q_FIN){
+                    char a[16],b[16],nm[16];
+                    pnom(sm[k].sl,nm);
+                    lg("TEST: %s %s->%s %s",nm,cn(sm[k].from,a),cn(sm[k].to,b),RT[Q_FIN]);
+                }
+            }
+            i+=g;
+            continue;
+        }
+        if(e->tipo==E_DPUMA||e->tipo==E_DDOG){
+            if(m0){
+                pthread_t th;
+                fa_t f={m0,e->tipo==E_DPUMA?0:1};
+                lg("TEST: desconexion abrupta del jugador %s",f.rol?"PERROS":"PUMA");
+                pthread_create(&th,NULL,th_falla,&f);
+                pthread_join(th,NULL);
+            }
+        }
+        if(e->tipo==E_SIGINT){
+            dormir(400);
+            lg("TEST: enviando SIGINT al proceso");
+            atomic_store(&gscript,1);
+            kill(getpid(),SIGINT);
+        }
+        if(e->tipo==E_WAITQ){
+            srv_esperar(s);
+        }
+        i++;
+    }
+    if(m0){
+        if(!scripted){
+            m0=NULL;
+        }else{
+            mesa_terminar(m0,"fin del script del caso");
+        }
+    }
+    srv_esperar(s);
+    int ok=srv_resumen(s);
+    srv_destroy(s);
+    lg("TEST %d: %s",t->num,ok?"OK":"FALLO");
+    return ok;
+}
+
+static int torneo(int n,int mx,const cfg_t*cfg){
+    srv_t*s=srv_nuevo(n,mx,cfg,0,0,0);
+    lg("TORNEO: N=%d jugadores, M=%d mesas maximas, seed=%u, retardo=%d..%d ms",n,mx,cfg->seed,cfg->dmin,cfg->dmax);
+    srv_iniciar(s);
+    srv_esperar(s);
+    int ok=srv_resumen(s);
+    srv_destroy(s);
+    return ok;
+}
+
+
+
+int main(int argc,char**argv){
+    if(argc<3||argc>4){
+        fprintf(stderr,"uso: %s N M [config.txt]\n",argv[0]);
+        return 2;
+    }
+    int N=atoi(argv[1]),M=atoi(argv[2]);
+    if(N<1||M<1){
+        fprintf(stderr,"N y M deben ser enteros positivos\n");
+        return 2;
+    }
+    clock_gettime(CLOCK_MONOTONIC,&t0);
+    tab_init();
+    sigset_t ss;
+    sigemptyset(&ss);
+    sigaddset(&ss,SIGINT);
+    pthread_sigmask(SIG_BLOCK,&ss,NULL);
+    glf=fopen("torneo.log","w");
+    cfg_t cfg;
+    cfg_def(&cfg);
+    test_t*ts=NULL;
+    int nts=0,suite=0,ret=0;
+    if(argc==4&&cargar(argv[3],&cfg,&ts,&nts,&suite)){
+        if(glf){
+            fclose(glf);
+        }
+        return 2;
+    }
+    pthread_t tsig;
+    pthread_create(&tsig,NULL,th_sig,NULL);
+    if(suite){
+        int ok=0,tot=0;
+        for(int i=0;i<nts;i++){
+            if(atomic_load(&gabort)){
+                lg("SUITE interrumpida por SIGINT");
+                break;
+            }
+            tot++;
+            ok+=run_test(&ts[i],N,M);
+        }
+        lg("SUITE: %d/%d casos OK",ok,tot);
+        if(ok!=tot){
+            ret=1;
+        }
+    }else if(!torneo(N,M,&cfg)){
+        ret=1;
+    }
+    if(atomic_load(&gabort)){
+        lg("PROGRAMA: finalizado por SIGINT; recursos liberados");
+    }
+    atomic_store(&gfin,1);
+    pthread_join(tsig,NULL);
+    for(int i=0;i<nts;i++){
+        free(ts[i].ev);
+    }
+    free(ts);
+    if(glf){
+        fclose(glf);
+    }
+    return ret;
+}
