@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS=-Wall -Wextra -std=c17 -O2 -pthread
 
-torneo:torneo.c
+torneo:Torneo.c
 	$(CC) $(CFLAGS) torneo.c -o torneo
 
 clean:

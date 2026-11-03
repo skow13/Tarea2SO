@@ -51,7 +51,7 @@ El código de salida es `0` si todo salió bien, `1` si algún caso o verificaci
 
 ## Formato del archivo de configuración
 
-Las líneas vacías se ignoran y todo lo que sigue a un `//` es un comentario. Las coordenadas se escriben como `x y` (0 a 4), o con los nombres `TRONO_TOP`, `TRONO_LEFT` y `TRONO_RIGHT` para las tres casillas del trono.
+Las líneas vacías se ignoran y todo lo que sigue a un `#` es un comentario. Las coordenadas se escriben como `x y` (0 a 4) o con los nombres `TRONO_TOP`, `TRONO_LEFT` y `TRONO_RIGHT` para las tres casillas del trono.
 
 Parámetros de configuración (en una misma línea o en líneas separadas):
 
@@ -66,6 +66,8 @@ Parámetros de configuración (en una misma línea o en líneas separadas):
 Ejemplo: `CONFIG SEED 42 DELAY_MIN 50 DELAY_MAX 300 PUMA_INIT 2 2`
 
 ## Formato de la suite de pruebas
+
+```
 SUITE_START 12
 
 TEST_CASE 1 "Partida Normal - Victoria del Puma"
@@ -75,27 +77,27 @@ EVENT MOVE DOG 4 FROM 1 3 TO 2 3
 TEST_END 1
 
 SUITE_END
+```
 
 Eventos soportados:
 
-Evento	Descripción
-EVENT MOVE PUMA 0 FROM x y TO x y	Movimiento del Puma.
-EVENT MOVE DOG id FROM x y TO x y	Movimiento del perro id.
-EVENT MOVE PUMA 0 FROM ... TO ... CAPTURE DOG id AT x y	Salto del Puma que captura al perro id.
-EVENT SPAWN_PLAYERS COUNT n MESAS_MAX m	Lanza n jugadores con un máximo de m mesas.
-EVENT WAIT_QUEUED_PLAYERS	Espera a que todos los jugadores en cola terminen.
-EVENT DISCONNECT PLAYER_PUMA / PLAYER_DOG ID n	Desconexión abrupta de un jugador.
-EVENT SIGNAL_SIGINT	Envía SIGINT al propio proceso.
-EVENT BURST_RANDOM_MOVES COUNT n	Ráfaga de n solicitudes aleatorias con retardo mínimo (stress test).
-
-Casos incluidos en test_cases.txt: partidas normales (1 y 2), colisiones concurrentes (3 y 4), saturación de mesas con cola de espera (5), captura por salto (6), movimientos inválidos (7), movimiento dentro del trono (8), desconexión abrupta del Puma y de un Perro (9 y 10), SIGINT del servidor (11) y stress test con retardo de 1 ms (12).
+| Evento | Descripción |
+|---|---|
+| `EVENT MOVE PUMA 0 FROM x y TO x y` | Movimiento del Puma. |
+| `EVENT MOVE DOG id FROM x y TO x y` | Movimiento del perro `id`. |
+| `EVENT MOVE PUMA 0 FROM ... TO ... CAPTURE DOG id AT x y` | Salto del Puma que captura al perro `id`. |
+| `EVENT SPAWN_PLAYERS COUNT n MESAS_MAX m` | Lanza `n` jugadores con un máximo de `m` mesas. |
+| `EVENT WAIT_QUEUED_PLAYERS` | Espera a que todos los jugadores en cola terminen. |
+| `EVENT DISCONNECT PLAYER_PUMA` / `PLAYER_DOG ID n` | Desconexión abrupta de un jugador. |
+| `EVENT SIGNAL_SIGINT` | Envía SIGINT al propio proceso. |
+| `EVENT BURST_RANDOM_MOVES COUNT n` | Ráfaga de `n` solicitudes aleatorias con retardo mínimo (stress test). |
 
 ## Reglas del juego implementadas
 
 El tablero es una grilla de 5x5 con adyacencia en 8 direcciones, más un trono de 3 casillas (`TRONO_TOP`, `TRONO_LEFT`, `TRONO_RIGHT`) conectado a la casilla (2,4). Hay 12 perros y 1 Puma.
 
 - Un movimiento es válido si la casilla destino está libre y es adyacente al origen.
-- El Puma además puede saltar sobre un perro adyacente hacia la casilla libre que está justo detrás, y eso captura al perro.
+- El Puma además puede saltar sobre un perro adyacente hacia la casilla libre que está justo detrás y eso captura al perro.
 - El Puma gana si captura 6 perros. Los Perros ganan si el Puma queda sin movimientos posibles (acorralado).
 - Si una partida en modo automático llega a 4000 jugadas aceptadas, se declara empate por límite de jugadas.
 - Un movimiento rechazado se informa con su motivo: casilla ocupada, no adyacente, salto sin perro, ficha no está en el origen, partida finalizada o casilla inválida.
@@ -127,11 +129,11 @@ Hilos que existen durante la ejecución:
 
 **Dos variables de condición por mesa, sin busy waiting.** `qcv` despierta al juez cuando llega una solicitud o cuando la partida debe terminar. `rcv` despierta a las fichas cuando el juez ya respondió su solicitud. Todas las esperas se hacen con `pthread_cond_wait` dentro de un `while` que reevalúa la condición, para tolerar despertares espurios. Los hilos nunca dan vueltas en un ciclo consultando el estado.
 
-**Semáforo para limitar las mesas a M.** El matchmaker hace `sem_wait` sobre un semáforo inicializado en M antes de crear una mesa, y la mesa hace `sem_post` al terminar (`mesa_fin`). Los jugadores que no encuentran mesa disponible quedan en cola de espera pasiva, bloqueados sin consumir CPU. El resumen final verifica que `simultaneas_max <= M`.
+**Semáforo para limitar las mesas a M.** El matchmaker hace `sem_wait` sobre un semáforo inicializado en M antes de crear una mesa y la mesa hace `sem_post` al terminar (`mesa_fin`). Los jugadores que no encuentran mesa disponible quedan en cola de espera pasiva, bloqueados sin consumir CPU. El resumen final verifica que `simultaneas_max <= M`.
 
-**Cola de emparejamiento con mutex y variable de condición.** El servidor guarda una cola de Pumas y otra de Perros bajo un mismo mutex (`srv->mu`). El matchmaker espera con `cv` hasta que haya al menos uno de cada rol, o hasta que lleguen todos los jugadores, y ahí marca como "sin pareja" a los que sobran.
+**Cola de emparejamiento con mutex y variable de condición.** El servidor guarda una cola de Pumas y otra de Perros bajo un mismo mutex (`srv->mu`). El matchmaker espera con `cv` hasta que haya al menos uno de cada rol o hasta que lleguen todos los jugadores, ahí marca como "sin pareja" a los que sobran.
 
-**Orden de adquisición de locks para evitar deadlock.** Cuando hay que tomar ambos mutex, siempre se toma primero el del servidor y después el de la mesa (por ejemplo, en `srv_detener`). El juez nunca mantiene el mutex de su mesa mientras toma el del servidor: lo suelta antes de llamar a `mesa_fin`.
+**Orden de adquisición de locks para evitar deadlock.** Cuando hay que tomar ambos mutex, siempre se toma primero el del servidor y después el de la mesa (por ejemplo, en `srv_detener`). El juez nunca mantiene el mutex de su mesa mientras toma el del servidor, lo suelta antes de llamar a `mesa_fin`.
 
 **Mutex robustos para las desconexiones abruptas.** Los mutex de las mesas se crean con `PTHREAD_MUTEX_ROBUST`. Si un hilo muere mientras tiene el lock (lo que simula el caso de prueba de desconexión abrupta), el siguiente que lo toma recibe `EOWNERDEAD`, lo marca como consistente con `pthread_mutex_consistent` y la mesa se marca como fallida. El juez entonces da la victoria al rival del jugador desconectado, despierta a todas las fichas con un `broadcast` y la mesa termina sin dejar hilos colgados ni bloquear al resto del torneo.
 
@@ -141,7 +143,7 @@ Hilos que existen durante la ejecución:
 
 **Log protegido por mutex.** Todas las escrituras a pantalla y a `torneo.log` pasan por un mutex global (`glg`), para que las líneas de hilos distintos no se mezclen.
 
-**Terminación limpia.** Al terminar una mesa, el juez espera con `pthread_join` a las 13 fichas de esa mesa, y el matchmaker espera a todos los jueces. Al final de `main` se espera al hilo de señales y se libera toda la memoria. No quedan hilos sin recoger.
+**Terminación limpia.** Al terminar una mesa, el juez espera con `pthread_join` a las 13 fichas de esa mesa y el matchmaker espera a todos los jueces. Al final de `main` se espera al hilo de señales y se libera toda la memoria. No quedan hilos sin recoger.
 
 ## Pruebas realizadas
 
