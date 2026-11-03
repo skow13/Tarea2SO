@@ -3,7 +3,7 @@
 Universidad Diego Portales - Escuela de Informática y Telecomunicaciones
 Integrantes: Diego Briones, Matias Rojas Lara
 
-Simulador de un torneo del torneo de Komikan concurrente usando hilos POSIX (pthreads). Un servidor recibe a N jugadores, los empareja (un Puma con un equipo de Perros) y los asigna a mesas, con un máximo de M partidas simultáneas. Cada mesa tiene un juez que valida y aplica los movimientos de forma serializada, de modo que el tablero nunca queda en un estado inconsistente aunque muchas fichas intenten moverse al mismo tiempo. El programa tolera desconexiones abruptas de jugadores y reacciona a SIGINT (Ctrl+C).
+Simulador de un torneo de Komikan concurrente usando hilos POSIX (pthreads). Un servidor recibe a N jugadores, los empareja (un Puma con un equipo de Perros) y los asigna a mesas, con un máximo de M partidas simultáneas. Cada mesa tiene un juez que valida y aplica los movimientos de forma serializada, de modo que el tablero nunca queda en un estado inconsistente aunque muchas fichas intenten moverse al mismo tiempo. El programa tolera desconexiones abruptas de jugadores y reacciona a SIGINT (Ctrl+C).
 
 ## Contenido del repositorio
 
